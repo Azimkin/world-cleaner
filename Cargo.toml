@@ -1,0 +1,16 @@
+[package]
+name = "world-cleaner"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+fastanvil = "0.32.0"
+fastnbt = "2.6.2"
+rayon = "1.12.0"
+serde = { version = "1.0.229", features = ["derive"] }
+toml = "1.1.4"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

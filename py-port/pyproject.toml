@@ -1,0 +1,13 @@
+[project]
+name = "world-cleaner"
+version = "0.1.0"
+description = "Fast Minecraft Anvil region cleaner"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+world-cleaner = "world_cleaner:main"
+
+[tool.uv]
+package = false
