@@ -7,7 +7,17 @@ use std::path::Path;
 pub struct Config {
     pub(crate) world_path: String,
     pub(crate) out_path: String,
+    /// `0` uses every available thread.
+    #[serde(default)]
+    pub(crate) threads: usize,
+    /// Regions to scan before moving matches and saving the cache.
+    #[serde(default = "default_flush_every")]
+    pub(crate) flush_every: usize,
     pub(crate) block_whitelist: Vec<String>,
+}
+
+fn default_flush_every() -> usize {
+    512
 }
 
 #[derive(Default, Deserialize, Serialize)]
@@ -22,6 +32,8 @@ fn example_config() -> Config {
     Config {
         world_path: "./world".into(),
         out_path: "./out".into(),
+        threads: 0,
+        flush_every: default_flush_every(),
         block_whitelist: vec![
             "minecraft:grass_block".into(),
             "minecraft:dirt".into(),
@@ -31,11 +43,37 @@ fn example_config() -> Config {
     }
 }
 
+pub fn available_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|count| count.get())
+        .unwrap_or(1)
+}
+
+/// `threads = 0` means the scan uses every available thread.
+pub fn threads_in_use(config: &Config) -> usize {
+    if config.threads == 0 {
+        available_threads()
+    } else {
+        config.threads
+    }
+}
+
+pub fn print_threads(config: &Config) {
+    println!(
+        "Threads: {} available, {} in use.",
+        available_threads(),
+        threads_in_use(config)
+    );
+}
+
 pub fn read_config(path: &str) -> Config {
     if !Path::new(path).is_file() {
         if path == "./config.toml" {
-            fs::write(path, toml::to_string_pretty(&example_config()).unwrap())
+            let example = example_config();
+            fs::write(path, toml::to_string_pretty(&example).unwrap())
                 .expect("Could not create example config");
+            println!("Created {path}.");
+            print_threads(&example);
         }
         panic!("Unable to read config file: {path}");
     }
@@ -44,6 +82,9 @@ pub fn read_config(path: &str) -> Config {
 }
 
 pub fn verify_config(config: &Config) {
+    if config.flush_every == 0 {
+        panic!("flush_every must be greater than 0");
+    }
     if !Path::new(&config.world_path).is_dir() {
         panic!("World directory does not exist or is not a directory");
     }

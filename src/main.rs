@@ -1,4 +1,4 @@
-use crate::config::{read_cache, read_config, verify_config, write_cache};
+use crate::config::{print_threads, read_cache, read_config, verify_config};
 use crate::region_reader::process_regions;
 use std::env;
 use std::time::Instant;
@@ -10,17 +10,15 @@ fn main() {
     let config_path = env::args().nth(1).unwrap_or(String::from("./config.toml"));
 
     let config = read_config(&config_path);
+    print_threads(&config);
     verify_config(&config);
     let cache_path = std::path::Path::new(&config_path).with_file_name("world-cleaner-cache.toml");
     let mut cache = read_cache(&cache_path);
     cache.last_deleted.clear();
 
     let started = Instant::now();
-    let result =
-        process_regions(&config, &cache.not_empty).expect("Could not scan region directory");
-    cache.not_empty.extend(result.kept_names);
-    cache.last_deleted = result.deleted_names;
-    write_cache(&cache_path, &cache);
+    let result = process_regions(&config, &mut cache, &cache_path)
+        .expect("Could not scan region directory");
     let elapsed = started.elapsed();
     let average = if result.checked == 0 {
         0.0

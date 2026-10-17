@@ -1,4 +1,4 @@
-use crate::config::Config;
+use crate::config::{Cache, Config, threads_in_use, write_cache};
 use fastanvil::Region;
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -34,8 +34,6 @@ pub struct ScanResult {
     pub moved: usize,
     pub skipped: usize,
     pub errors: Vec<String>,
-    pub kept_names: Vec<String>,
-    pub deleted_names: Vec<String>,
     pub chunks_checked: usize,
     pub chunks_matching_filter: usize,
 }
@@ -135,12 +133,16 @@ fn move_file(source: &Path, output_dir: &Path) -> Result<(), String> {
     }
 }
 
-pub fn process_regions(config: &Config, skip: &HashSet<String>) -> Result<ScanResult, String> {
+pub fn process_regions(
+    config: &Config,
+    cache: &mut Cache,
+    cache_path: &Path,
+) -> Result<ScanResult, String> {
     let whitelist: HashSet<String> = config.block_whitelist.iter().cloned().collect();
     let (skipped, paths): (Vec<_>, Vec<_>) = region_files(config)?.into_iter().partition(|path| {
         path.file_name()
-            .and_then(|n| n.to_str())
-            .is_some_and(|n| skip.contains(n))
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| cache.not_empty.contains(name))
     });
     println!(
         "Found {} regions: {} queued, {} skipped from cache.",
@@ -148,59 +150,77 @@ pub fn process_regions(config: &Config, skip: &HashSet<String>) -> Result<ScanRe
         paths.len(),
         skipped.len()
     );
-    let total = paths.len();
-    let progress_step = (total / 100).max(1);
-    let completed = AtomicUsize::new(0);
-    let decisions: Vec<_> = paths
-        .par_iter()
-        .map(|path| {
-            let decision = inspect_region(path, &whitelist);
-            let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
-            if current % progress_step == 0 || current == total {
-                println!("Progress: {current}/{total}");
-            }
-            (path, decision)
-        })
-        .collect();
     let mut result = ScanResult {
-        checked: decisions.len(),
+        checked: 0,
         kept: 0,
         moved: 0,
         skipped: skipped.len(),
         errors: vec![],
-        kept_names: vec![],
-        deleted_names: vec![],
         chunks_checked: 0,
         chunks_matching_filter: 0,
     };
-    for (path, decision) in decisions {
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("<invalid name>")
-            .to_owned();
-        match decision {
-            Ok(decision) if !decision.removable => {
-                result.chunks_checked += decision.chunks_checked;
-                result.chunks_matching_filter += decision.chunks_matching_filter;
-                result.kept += 1;
-                result.kept_names.push(name);
+    if paths.is_empty() {
+        write_cache(cache_path, cache);
+        return Ok(result);
+    }
+
+    let total = paths.len();
+    let progress_step = (total / 100).max(1);
+    let completed = AtomicUsize::new(0);
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(threads_in_use(config))
+        .build()
+        .map_err(|error| error.to_string())?;
+    for chunk in paths.chunks(config.flush_every) {
+        let decisions: Vec<_> = pool.install(|| {
+            chunk
+                .par_iter()
+                .map(|path| {
+                    let decision = inspect_region(path, &whitelist);
+                    let current = completed.fetch_add(1, Ordering::Relaxed) + 1;
+                    if current % progress_step == 0 || current == total {
+                        println!("Progress: {current}/{total}");
+                    }
+                    (path, decision)
+                })
+                .collect()
+        });
+        for (path, decision) in decisions {
+            let name = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("<invalid name>")
+                .to_owned();
+            match decision {
+                Ok(decision) if !decision.removable => {
+                    result.chunks_checked += decision.chunks_checked;
+                    result.chunks_matching_filter += decision.chunks_matching_filter;
+                    result.kept += 1;
+                    cache.not_empty.insert(name);
+                }
+                Ok(decision) => match move_file(path, Path::new(&config.out_path)) {
+                    Ok(()) => {
+                        result.chunks_checked += decision.chunks_checked;
+                        result.chunks_matching_filter += decision.chunks_matching_filter;
+                        result.moved += 1;
+                        cache.last_deleted.push(name);
+                    }
+                    Err(error) => {
+                        result.chunks_checked += decision.chunks_checked;
+                        result.chunks_matching_filter += decision.chunks_matching_filter;
+                        result.errors.push(format!("{name}: {error}"));
+                    }
+                },
+                Err(error) => result.errors.push(format!("{name}: {error}")),
             }
-            Ok(decision) => match move_file(path, Path::new(&config.out_path)) {
-                Ok(()) => {
-                    result.chunks_checked += decision.chunks_checked;
-                    result.chunks_matching_filter += decision.chunks_matching_filter;
-                    result.moved += 1;
-                    result.deleted_names.push(name);
-                }
-                Err(e) => {
-                    result.chunks_checked += decision.chunks_checked;
-                    result.chunks_matching_filter += decision.chunks_matching_filter;
-                    result.errors.push(format!("{name}: {e}"));
-                }
-            },
-            Err(e) => result.errors.push(format!("{name}: {e}")),
         }
+        result.checked += chunk.len();
+        write_cache(cache_path, cache);
+        let done = completed.load(Ordering::Relaxed);
+        println!(
+            "Saved cache: {done}/{total} scanned, {} moved.",
+            result.moved
+        );
     }
     Ok(result)
 }
